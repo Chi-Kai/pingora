@@ -15,41 +15,58 @@
 use async_trait::async_trait;
 use clap::Parser;
 
+use bytes::Bytes;
 use pingora_core::modules::http::{FilterAction, HttpModules};
 use pingora_core::server::configuration::Opt;
 use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::Result;
 use pingora_http::RequestHeader;
+use pingora_http::ResponseHeader;
 use pingora_proxy::{ProxyHttp, Session};
 
 /// This example shows how to build and import 3rd party modules
 
 /// A simple ACL to check "Authorization: basic $credential" header
-mod my_acl {
+mod my_module {
     use super::*;
     use pingora_core::modules::http::{HttpModule, HttpModuleBuilder, Module};
     use pingora_error::{Error, ErrorType::HTTPStatus};
     use std::any::Any;
 
-    // This is the struct for per request module context
-    struct MyAclCtx {
-        credential_header: String,
-    }
+    // first module
+    struct MyAclCtx {}
 
-    // Implement how the module would consume and/or modify request and/or response
     #[async_trait]
     impl HttpModule for MyAclCtx {
         async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<FilterAction> {
-            let Some(auth) = req.headers.get(http::header::AUTHORIZATION) else {
-                return Error::e_explain(HTTPStatus(403), "Auth failed, no auth header");
-            };
+            println!("MyAcl - processing request");
 
-            if auth.as_bytes() != self.credential_header.as_bytes() {
-                Error::e_explain(HTTPStatus(403), "Auth failed, credential mismatch")
-            } else {
-                Ok(FilterAction::Continue)
+            if let Some(test_action) = req.headers.get("X-Test-Action") {
+                match test_action.to_str().unwrap_or("") {
+                    "continue" => {
+                        println!("MyAcl - continuing");
+                        return Ok(FilterAction::Continue);
+                    }
+                    "response" => {
+                        println!("MyAcl - sending custom response");
+                        let mut resp = Box::new(ResponseHeader::build(200, None).unwrap());
+                        resp.insert_header("X-Test", "custom_response").unwrap();
+                        resp.insert_header("Content-Length", "16").unwrap(); // 添加Content-Length
+                        return Ok(FilterAction::Response(
+                            resp,
+                            Some(Bytes::from("Test response body")),
+                        ));
+                    }
+                    "error" => {
+                        println!("MyAcl - returning error");
+                        return Error::e_explain(HTTPStatus(400), "Test error action");
+                    }
+                    _ => {}
+                }
             }
+
+            Ok(FilterAction::Continue) // 默认继续处理
         }
 
         // boilerplate code for all modules
@@ -62,18 +79,39 @@ mod my_acl {
     }
 
     // This is the singleton object which will be attached to the server
-    pub struct MyAcl {
-        pub credential: String,
-    }
+    pub struct MyAcl {}
     impl HttpModuleBuilder for MyAcl {
         // This function defines how to create each Ctx. This function is called when a new request
         // arrives
         fn init(&self) -> Module {
-            Box::new(MyAclCtx {
-                // Make it easier to compare header
-                // We could also store this value in MyAcl and use Arc to share it with every Ctx.
-                credential_header: format!("basic {}", self.credential),
-            })
+            Box::new(MyAclCtx {})
+        }
+    }
+
+    // second module
+    struct MyLogCtx {}
+
+    // Implement how the module would consume and/or modify request and/or response
+    #[async_trait]
+    impl HttpModule for MyLogCtx {
+        async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<FilterAction> {
+            let test_action = req.headers.get("X-Test-Action");
+            println!("test_action: {:?}", test_action);
+            Ok(FilterAction::Continue)
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    // This is the singleton object which will be attached to the server
+    pub struct MyLog {}
+    impl HttpModuleBuilder for MyLog {
+        fn init(&self) -> Module {
+            Box::new(MyLogCtx {})
         }
     }
 }
@@ -88,9 +126,8 @@ impl ProxyHttp for MyProxy {
     // This function is only called once when the server starts
     fn init_downstream_modules(&self, modules: &mut HttpModules) {
         // Add the module to MyProxy
-        modules.add_module(Box::new(my_acl::MyAcl {
-            credential: "testcode".into(),
-        }))
+        modules.add_module(Box::new(my_module::MyAcl {}));
+        modules.add_module(Box::new(my_module::MyLog {}));
     }
 
     async fn upstream_peer(

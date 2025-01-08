@@ -45,18 +45,18 @@ impl HttpModule for GrpcWebBridge {
         self
     }
 
-    async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<()> {
+    async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<FilterAction> {
         self.0.request_header_filter(req);
-        Ok(())
+        Ok(FilterAction::Continue)
     }
 
     async fn response_header_filter(
         &mut self,
         resp: &mut ResponseHeader,
         _end_of_stream: bool,
-    ) -> Result<()> {
+    ) -> Result<FilterAction> {
         self.0.response_header_filter(resp);
-        Ok(())
+        Ok(FilterAction::Continue)
     }
 
     fn response_trailer_filter(

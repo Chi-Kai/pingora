@@ -27,42 +27,51 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::HeaderMap;
 use once_cell::sync::OnceCell;
-use pingora_error::Result;
+use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use std::any::Any;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub enum FilterAction {
+    // continue to the next filter
+    Continue,
+    // return response and stop all filters and stream
+    Response(Box<ResponseHeader>, Option<Bytes>),
+    // stop the filter chain and return error
+    Error(Error),
+}
+
 /// The trait an HTTP traffic module needs to implement
 #[async_trait]
 pub trait HttpModule {
-    async fn request_header_filter(&mut self, _req: &mut RequestHeader) -> Result<()> {
-        Ok(())
+    async fn request_header_filter(&mut self, _req: &mut RequestHeader) -> Result<FilterAction> {
+        Ok(FilterAction::Continue)
     }
 
     async fn request_body_filter(
         &mut self,
         _body: &mut Option<Bytes>,
         _end_of_stream: bool,
-    ) -> Result<()> {
-        Ok(())
+    ) -> Result<FilterAction> {
+        Ok(FilterAction::Continue)
     }
 
     async fn response_header_filter(
         &mut self,
         _resp: &mut ResponseHeader,
         _end_of_stream: bool,
-    ) -> Result<()> {
-        Ok(())
+    ) -> Result<FilterAction> {
+        Ok(FilterAction::Continue)
     }
 
     fn response_body_filter(
         &mut self,
         _body: &mut Option<Bytes>,
         _end_of_stream: bool,
-    ) -> Result<()> {
-        Ok(())
+    ) -> Result<FilterAction> {
+        Ok(FilterAction::Continue)
     }
 
     fn response_trailer_filter(
@@ -195,11 +204,17 @@ impl HttpModuleCtx {
     }
 
     /// Run the `request_header_filter` for all the modules according to their orders.
-    pub async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<()> {
+    pub async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<FilterAction> {
         for filter in self.module_ctx.iter_mut() {
-            filter.request_header_filter(req).await?;
+            match filter.request_header_filter(req).await? {
+                FilterAction::Continue => continue,
+                FilterAction::Error(err) => return Err(err.into()),
+                FilterAction::Response(response, body) => {
+                    return Ok(FilterAction::Response(response, body))
+                }
+            }
         }
-        Ok(())
+        Ok(FilterAction::Continue)
     }
 
     /// Run the `request_body_filter` for all the modules according to their orders.
@@ -207,11 +222,17 @@ impl HttpModuleCtx {
         &mut self,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
-    ) -> Result<()> {
+    ) -> Result<FilterAction> {
         for filter in self.module_ctx.iter_mut() {
-            filter.request_body_filter(body, end_of_stream).await?;
+            match filter.request_body_filter(body, end_of_stream).await? {
+                FilterAction::Continue => continue,
+                FilterAction::Error(err) => return Err(err.into()),
+                FilterAction::Response(response, body) => {
+                    return Ok(FilterAction::Response(response, body))
+                }
+            }
         }
-        Ok(())
+        Ok(FilterAction::Continue)
     }
 
     /// Run the `response_header_filter` for all the modules according to their orders.
@@ -219,11 +240,17 @@ impl HttpModuleCtx {
         &mut self,
         req: &mut ResponseHeader,
         end_of_stream: bool,
-    ) -> Result<()> {
+    ) -> Result<FilterAction> {
         for filter in self.module_ctx.iter_mut() {
-            filter.response_header_filter(req, end_of_stream).await?;
+            match filter.response_header_filter(req, end_of_stream).await? {
+                FilterAction::Continue => continue,
+                FilterAction::Error(err) => return Err(err.into()),
+                FilterAction::Response(response, body) => {
+                    return Ok(FilterAction::Response(response, body))
+                }
+            }
         }
-        Ok(())
+        Ok(FilterAction::Continue)
     }
 
     /// Run the `response_body_filter` for all the modules according to their orders.
@@ -231,11 +258,17 @@ impl HttpModuleCtx {
         &mut self,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
-    ) -> Result<()> {
+    ) -> Result<FilterAction> {
         for filter in self.module_ctx.iter_mut() {
-            filter.response_body_filter(body, end_of_stream)?;
+            match filter.response_body_filter(body, end_of_stream)? {
+                FilterAction::Continue => continue,
+                FilterAction::Error(err) => return Err(err.into()),
+                FilterAction::Response(response, body) => {
+                    return Ok(FilterAction::Response(response, body))
+                }
+            }
         }
-        Ok(())
+        Ok(FilterAction::Continue)
     }
 
     /// Run the `response_trailer_filter` for all the modules according to their orders.
@@ -273,8 +306,9 @@ mod tests {
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
-        async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<()> {
-            req.insert_header("my-filter", "1")
+        async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<FilterAction> {
+            let _ = req.insert_header("my-filter", "1");
+            Ok(FilterAction::Continue)
         }
     }
     struct MyModuleBuilder;
@@ -297,13 +331,15 @@ mod tests {
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
-        async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<()> {
+        async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<FilterAction> {
             if req.headers.get("my-filter").is_some() {
                 // if this MyOtherModule runs after MyModule
-                req.insert_header("my-filter", "2")
+                let _ = req.insert_header("my-filter", "2");
+                Ok(FilterAction::Continue)
             } else {
                 // if this MyOtherModule runs before MyModule
-                req.insert_header("my-other-filter", "1")
+                let _ = req.insert_header("my-other-filter", "1");
+                Ok(FilterAction::Continue)
             }
         }
     }

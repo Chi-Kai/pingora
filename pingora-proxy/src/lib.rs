@@ -52,7 +52,7 @@ use pingora_cache::NoCacheReason;
 use pingora_core::apps::{HttpServerApp, HttpServerOptions};
 use pingora_core::connectors::{http::Connector, ConnectorOptions};
 use pingora_core::modules::http::compression::ResponseCompressionBuilder;
-use pingora_core::modules::http::{HttpModuleCtx, HttpModules};
+use pingora_core::modules::http::{FilterAction, HttpModuleCtx, HttpModules};
 use pingora_core::protocols::http::client::HttpSession as ClientSession;
 use pingora_core::protocols::http::v1::client::HttpSession as HttpSessionV1;
 use pingora_core::protocols::http::HttpTask;
@@ -494,19 +494,56 @@ impl<SV> HttpProxy<SV> {
         let req = session.downstream_session.req_header_mut();
 
         // Built-in downstream request filters go first
-        if let Err(e) = session
+        match session
             .downstream_modules_ctx
             .request_header_filter(req)
             .await
         {
-            self.handle_error(
-                &mut session,
-                &mut ctx,
-                e,
-                "Failed in downstream modules request filter:",
-            )
-            .await;
-            return None;
+            Ok(FilterAction::Continue) => {}
+            Ok(FilterAction::Response(resp, body)) => {
+                match session.downstream_session.write_response_header(resp).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.handle_error(
+                            &mut session,
+                            &mut ctx,
+                            e,
+                            "Error responding with Bad Gateway:",
+                        )
+                        .await;
+
+                        return None;
+                    }
+                }
+                match session
+                    .downstream_session
+                    .write_response_body(body.unwrap_or_default(), true)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.handle_error(
+                            &mut session,
+                            &mut ctx,
+                            e,
+                            "Error responding with Bad Gateway:",
+                        )
+                        .await;
+                    }
+                }
+                return session.downstream_session.finish().await.ok().flatten();
+            }
+            Ok(FilterAction::Error(e)) => {}
+            Err(e) => {
+                self.handle_error(
+                    &mut session,
+                    &mut ctx,
+                    e,
+                    "Failed in downstream modules request filter:",
+                )
+                .await;
+                return None;
+            }
         }
 
         match self.inner.request_filter(&mut session, &mut ctx).await {

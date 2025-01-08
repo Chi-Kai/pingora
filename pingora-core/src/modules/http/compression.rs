@@ -44,33 +44,33 @@ impl HttpModule for ResponseCompression {
         self
     }
 
-    async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<()> {
+    async fn request_header_filter(&mut self, req: &mut RequestHeader) -> Result<FilterAction> {
         self.0.request_filter(req);
-        Ok(())
+        Ok(FilterAction::Continue)
     }
 
     async fn response_header_filter(
         &mut self,
         resp: &mut ResponseHeader,
         end_of_stream: bool,
-    ) -> Result<()> {
+    ) -> Result<FilterAction> {
         self.0.response_header_filter(resp, end_of_stream);
-        Ok(())
+        Ok(FilterAction::Continue)
     }
 
     fn response_body_filter(
         &mut self,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
-    ) -> Result<()> {
+    ) -> Result<FilterAction> {
         if !self.0.is_enabled() {
-            return Ok(());
+            return Ok(FilterAction::Continue);
         }
         let compressed = self.0.response_body_filter(body.as_ref(), end_of_stream);
         if compressed.is_some() {
             *body = compressed;
         }
-        Ok(())
+        Ok(FilterAction::Continue)
     }
 }
 
